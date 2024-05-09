@@ -30,7 +30,7 @@ PRUNE_TIME = 0
 class NeighborSampler:
     def __init__(self, g, node_feats, fanouts, world_size, device, history):
         self.g = g
-        self.node_feats = node_feats
+        # self.node_feats = node_feats
         self.fanouts = fanouts
         self.device = device
         self.world_size = world_size
@@ -60,7 +60,7 @@ class NeighborSampler:
                 block.dstdata["pruned"] = torch.zeros(block.dstdata[dgl.NID].shape[0], dtype=torch.bool)
                 # print("block1: ", block)
                 s1 = time.time()
-                block = block.to(torch.device('cuda'))
+                block = block.to(self.device)
                 history = histories[len(histories)-l]
                 # s1 = time.time()
                 block = history.prune(block).to(torch.device('cpu'))
@@ -73,7 +73,7 @@ class NeighborSampler:
                 block.dstdata["pruned"] = torch.zeros(block.dstdata[dgl.NID].shape[0], dtype=torch.bool)
                 # print("block1: ", block)
                 s1 = time.time()
-                block = block.to(torch.device('cuda'))
+                block = block.to(self.device)
                 history = histories[len(histories)-l]
                 # s1 = time.time()
                 block = history.prune(block).to(torch.device('cpu'))
@@ -121,6 +121,9 @@ def run(args, device, data, num_nodes):
         device,
         F.relu,
         args.dropout,
+        args.ratio,
+        args.pgrad,
+        args.tstale,
     )
 
     shuffle = True
@@ -169,6 +172,14 @@ def run(args, device, data, num_nodes):
     all_prune__time = []
     all_sample_comm_time = []
     all_feature_time = []
+    accumulate_time = []
+    accuracy_list = []
+    zero_time = time.time()
+    useHistory = True
+    draw_accu_time = []
+    draw_acc = []
+    begin_time = time.time()
+    runtime.model.data_stage.module.start_history()
     for epoch in range(args.num_epochs):
         start = time.time()
         global SAMPLE_TIME, SAMPLE_COMM_TIME, FEATURE_TIME, PRUNE_TIME
@@ -181,12 +192,24 @@ def run(args, device, data, num_nodes):
         for it in range(num_iter):
             output, loss, target = runtime.forward()
             runtime.backward_and_step()
+            accuracy_list.append(compute_acc(output, target).item())
+            draw_accu_time.append(time.time() - begin_time)
+            draw_acc.append(compute_acc(output, target).item())
             if it % 20 == 0:
+                # if rank == 0:
                 acc = compute_acc(output, target)
                 mem = torch.cuda.max_memory_allocated() / 1000000
+                ctime = time.time() - zero_time
+                accumulate_time.append(ctime)
                 print(
-                    "Epoch: {}, step: {}, loss: {}, acc: {}, GPU mem: {}".format(
-                        epoch, it, loss, acc.item(), mem
+                    "Epoch: {}, step: {}, loss: {}, acc: {}, GPU mem: {}, cumulative time: {}".format(
+                        # "{},{},{},{},{},{}".format(
+                        epoch,
+                        it,
+                        loss,
+                        acc.item(),
+                        mem,
+                        ctime,
                     )
                 )
         torch.cuda.synchronize()
@@ -195,6 +218,15 @@ def run(args, device, data, num_nodes):
         all_prune__time.append(PRUNE_TIME)
         all_sample_comm_time.append(SAMPLE_COMM_TIME)
         all_feature_time.append(FEATURE_TIME)
+        """
+        if useHistory:
+            accuracy_ascend = [(b-a)/b for a,b in zip(accuracy_list, accuracy_list[1:])]
+            if sum(accuracy_ascend) < 0.5:
+                useHistory = False
+                #runtime.model.data_stage.module.change_history(0.3, 100)
+        """
+        accuracy_list = []
+        """"""
         print(
             "Epoch: {}, iteration nums: {}, time: {} (S), sample time:{}, sample comm time: {}, feature time: {}, prune time: {}".format(
                 epoch,
@@ -239,6 +271,9 @@ def run(args, device, data, num_nodes):
             mean_prune_time,
         )
     )
+    # if rank == 0:
+    #     for (accu_time, acc) in zip(draw_accu_time, draw_acc):
+    #         print("[", accu_time, ", ", acc, "],")
     if args.eval:
         # 测试集
         num_iter = (test_nid.shape[-1] + args.batch_size) // args.batch_size
@@ -375,9 +410,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_epochs", type=int, default=20)
     parser.add_argument("--num_hidden", type=int, default=16)
+    parser.add_argument("--ratio", type=float, default=0.4)
+    parser.add_argument("--pgrad", type=float, default=0.9)
+    parser.add_argument("--tstale", type=int, default=25)
     parser.add_argument("--num_samplers", type=int, default=0)
-    parser.add_argument("--num_layers", type=int, default=2)
-    parser.add_argument("--fan_out", type=str, default="25,10")
+    parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--fan_out", type=str, default="25,10,10")
     parser.add_argument("--batch_size", type=int, default=1000)
     parser.add_argument("--batch_size_eval", type=int, default=100000)
     parser.add_argument("--log_every", type=int, default=20)

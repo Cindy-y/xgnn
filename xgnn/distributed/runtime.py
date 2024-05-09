@@ -186,12 +186,14 @@ class StageRuntime:
 
         #histroy_alias[0].push(blocks[0].srcdata[dgl.NID].tolist(), feats, feats_grad["feats"], 1e-4)
         #histroy_alias[0].push(blocks[0].srcdata[dgl.NID].tolist(), feat_alias[0], feat_grad_alias[0]["feats"], 1)
-        histroy_alias[0].push(blocks[0].srcdata[dgl.NID], feat_alias[0], feat_grad_alias[0]["feats"], 1e-1)
+        # histroy_alias[0].push(blocks[0].srcdata[dgl.NID], feat_alias[0], feat_grad_alias[0]["feats"], 1e-1)
+        histroy_alias[0].push(blocks[0].srcdata[dgl.NID], feat_alias[0], feat_grad_alias[0]["feats"])
         
         for l, block in enumerate(blocks):
             if(l != len(blocks)-1):
                 #histroy_alias[l+1].push(block.dstdata[dgl.NID].tolist(), feat_alias[l+1], feat_grad_alias[l+1]["feats"], 1)
-                histroy_alias[l+1].push(block.dstdata[dgl.NID], feat_alias[l+1], feat_grad_alias[l+1]["feats"], 1e-1)
+                # histroy_alias[l+1].push(block.dstdata[dgl.NID], feat_alias[l+1], feat_grad_alias[l+1]["feats"], 1e-6)
+                histroy_alias[l+1].push(block.dstdata[dgl.NID], feat_alias[l+1], feat_grad_alias[l+1]["feats"])
         assert feat_grad_alias[0]["feats"] is not None, "feats grad is None"
         assert (
             feat_grad_alias[0]["feats"].shape == feats.shape

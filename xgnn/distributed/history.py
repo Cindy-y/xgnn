@@ -5,22 +5,102 @@ import logging
 
 class History(torch.nn.Module):
     """A historical embedding storage module"""
-    def __init__(self, num_nodes: int, embedding_dim: int):
+    def __init__(self, num_nodes: int, embedding_dim: int, ratio, pgrad, tstale, device):
         super().__init__()
 
-        self.ratio = 0.4
+        self.ratio = ratio
+        self.pgrad = pgrad
+        self.tstale = int(tstale)
 
-        device = torch.device('cuda')
+        self.device = device
+ 
+        self.num_nodes = num_nodes
+        self.num_embeddings = 0
+        self.embedding_dim = embedding_dim
+
+        self.pos = torch.empty(self.num_nodes, device = self.device, dtype=torch.long)           # 指示顶点特征所在的历史嵌入索引
+        self.pos.fill_(-1)
+        self.time = torch.empty(self.num_nodes, device = self.device, dtype=torch.int)
+        self.time.fill_(0)
+
+    def set_pgrad(self, pgrad):
+        self.pgrad = pgrad
+    
+    def set_tstale(self, tstale):
+        self.tstale = tstale
+
+    def start(self):
+        self.num_embeddings = int(100)
+        # print("self.num_embeddings: ", self.num_embeddings)
+        self.emb = torch.empty(self.num_embeddings, self.embedding_dim, device=self.device)
+        self.index_to_gid = torch.empty(self.num_embeddings, device = self.device, dtype = torch.long)
+        self.emb.fill_(0)
+        self.index_to_gid.fill_(-1)
+
+    def __init__20(self, num_nodes: int, embedding_dim: int, ratio, pgrad, tstale):
+        super().__init__()
+
+        self.ratio = ratio
+        self.pgrad = pgrad
+        self.tstale = int(tstale)
+
+        self.device = torch.device('cuda')
+ 
+        self.num_nodes = num_nodes
+        self.num_embeddings = 0
+        self.embedding_dim = embedding_dim
+
+        self.pos = torch.empty(self.num_nodes, device = self.device, dtype=torch.long)           # 指示顶点特征所在的历史嵌入索引
+        self.pos.fill_(-1)
+        self.time = torch.empty(self.num_nodes, device = self.device, dtype=torch.int)
+        self.time.fill_(0)
+
+        # self.index = 0
+        self.embInit = False
+
+    def __init__10(self, num_nodes: int, embedding_dim: int, ratio, pgrad, tstale):
+        super().__init__()
+
+        self.ratio = ratio
+        self.pgrad = pgrad
+        self.tstale = int(tstale)
+
+        self.device = torch.device('cuda')
+ 
+        self.num_nodes = num_nodes
+        self.num_embeddings = 0
+        self.embedding_dim = embedding_dim
+
+        self.emb = torch.tensor([], device=self.device)
+
+        self.pos = torch.empty(self.num_nodes, device = self.device, dtype=torch.long)           # 指示顶点特征所在的历史嵌入索引
+
+        self.index_to_gid = torch.tensor([], device = self.device, dtype = torch.long)
+
+        self.index = 0
+
+        self.pos.fill_(-1)
+
+        # self.reset_parameters()
+
+    def __init__1(self, num_nodes: int, embedding_dim: int, ratio, pgrad, tstale):
+        super().__init__()
+
+        self.ratio = ratio
+        self.pgrad = pgrad
+        self.tstale = int(tstale)
+
+        self.device = torch.device('cuda')
  
         self.num_nodes = num_nodes
         self.num_embeddings = int(num_nodes * self.ratio)
         self.embedding_dim = embedding_dim
 
-        self.emb = torch.empty(self.num_embeddings, embedding_dim, device=device)
+        self.emb = torch.empty(self.num_embeddings, embedding_dim, device=self.device)
 
-        self.pos = torch.empty(self.num_nodes, device = device, dtype=torch.long)           # 指示顶点特征所在的历史嵌入索引
+        self.pos = torch.empty(self.num_nodes, device = self.device, dtype=torch.long)           # 指示顶点特征所在的历史嵌入索引
 
-        self.index_to_gid = torch.empty(self.num_embeddings, device = device, dtype = torch.long)
+        self.index_to_gid = torch.empty(self.num_embeddings, device = self.device, dtype = torch.long)
 
         self.index = 0
 
@@ -32,33 +112,142 @@ class History(torch.nn.Module):
         self.index_to_gid.fill_(-1)
         self.index = 0
 
-    '''
-    def push(self, gids, feats, grad, grad_thresh):
-        #环形缓冲区
-        dim = self.embedding_dim
-        grad_stat = torch.norm(grad, dim=1)
-        lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long).tolist()    # 所有满足梯度阈值条件的下标
-        # lid = [b for a in lid for b in a]   
-        gid = [gids[id] for id in lid]
-        for i in range(len(gid)):
-            g_id = gid[i]
-            l_id = lid[i]
-            if(self.pos[g_id] == -1):
-                index = int(self.index % self.num_embeddings)
-                if(self.index_to_gid[index] != -1 and self.pos[self.index_to_gid[index]] != -1):
-                    self.pos[self.index_to_gid[index]] = -1
-                self.emb[index] = feats[l_id].detach()
-                self.pos[g_id] = index
-                self.index_to_gid[index] = g_id
-                self.index += 1
-    '''
+    def emb_size(self):
+        print("emb_size: {}".format(self.emb.size()))
 
-    def push(self, gids, feats, grad, grad_thresh):
-        '''环形缓冲区'''
+    def push(self, gids, feats, grad):
+        '''
+        过期时间缓冲区: 
+        缓冲区大小初始化为一个非0的较小数,比如100
+        梯度满足pgrad阈值比例的中间嵌入缓存在缓冲区中:
+            如果缓冲区空位足够,则直接缓存
+            空位不够,则直接增大缓存,在尾部增加相应的空位
+        每一次push结束,非空位置的缓存时间就加1,然后移除缓存时间超过tstale的位置
+        '''
+        if self.num_embeddings == 0:
+            return
+
+        resetIndexs = self.pos[gids]
+        self.pos[gids] = -1
+        self.index_to_gid[resetIndexs] = -1
+        self.time[gids] = 0
+
+        grad_stat = torch.norm(grad, dim=1)
+        point = (int)(grad.shape[0] * self.pgrad)
+        grad_thresh = torch.kthvalue(grad_stat, point).values.squeeze()
+        lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long)    # 所有满足梯度阈值条件的下标
+        gid = gids[lid]
+        num = gid.shape[0]
+        if num == 0:
+            return
+
+        poses = self.index_to_gid.eq(-1).nonzero().squeeze().type(torch.long) # 空着的位置
+        if(poses.shape[0] < num):
+            emb = torch.empty(num - poses.shape[0], self.embedding_dim, device = self.device)
+            emb.fill_(0)
+            index_to_gid = torch.empty(num - poses.shape[0], device = self.device, dtype=torch.long)
+            index_to_gid.fill_(-1)
+
+            self.emb = torch.cat([self.emb, emb], dim=0)
+            self.index_to_gid = torch.cat([self.index_to_gid, index_to_gid])
+
+            self.num_embeddings += (num - poses.shape[0])
+            # print("self.num_embeddings: ", self.num_embeddings)
+        poses = self.index_to_gid.eq(-1).nonzero().squeeze().type(torch.long)
+        poses = poses[0:num]
+        self.emb[poses] = feats[lid].detach()
+        self.pos[gid] = poses
+        self.index_to_gid[poses] = gid
+
+        indexs = self.pos.ne(-1).nonzero().squeeze().type(torch.long) 
+        self.time[indexs] = self.time[indexs] + 1
+        gid = self.time.ge(self.tstale).nonzero().squeeze().type(torch.long) 
+        resetIndexs = self.pos[gid]
+        self.pos[gid] = -1
+        self.index_to_gid[resetIndexs] = -1
+        self.time[gid] = 0
+
+
+    def push20(self, gids, feats, grad):      
+        '''
+        过期时间缓冲区: 
+        缓冲区大小初始化为 第一次push的顶点总数 * pgrad * tstale
+        梯度满足pgrad阈值比例的中间嵌入缓存在缓冲区中:
+            如果缓冲区空位足够,则直接缓存
+            空位不够,则移除缓存时间最久的位置,并把该位置时间重置为0
+        每一次push结束,非空位置的缓存时间就加1
+        '''
+        if not self.embInit:
+            self.num_embeddings = int(grad.shape[0] * self.pgrad * self.tstale)
+            #print("self.num_embeddings: ", self.num_embeddings)
+            self.emb = torch.empty(self.num_embeddings, self.embedding_dim, device=self.device)
+            self.index_to_gid = torch.empty(self.num_embeddings, device = self.device, dtype = torch.long)
+            self.emb.fill_(0)
+            self.index_to_gid.fill_(-1)
+            self.embInit = True
+
+        if self.num_embeddings == 0:
+            return
+
+        resetIndexs = self.pos[gids]
+        self.pos[gids] = -1
+        self.index_to_gid[resetIndexs] = -1
+        self.time[gids] = 0
+
+        grad_stat = torch.norm(grad, dim=1)
+        point = (int)(grad.shape[0] * self.pgrad)
+        grad_thresh = torch.kthvalue(grad_stat, point).values.squeeze()
+        lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long)    # 所有满足梯度阈值条件的下标
+        gid = gids[lid]
+        num = gid.shape[0]
+        if num == 0:
+            return
+
+        poses = self.index_to_gid.eq(-1).nonzero().squeeze().type(torch.long) # 空着的位置
+        if(poses.shape[0] < num):
+            delete_time = torch.kthvalue(self.time, self.num_nodes - (num - poses.shape[0])).values.squeeze()
+            deleteLid = self.time.ge(delete_time).nonzero().squeeze().type(torch.long) 
+            deleteGid = gids[deleteLid]
+            deleteIndex = self.pos[deleteGid]
+            self.pos[deleteGid] = -1
+            self.index_to_gid[deleteIndex] = -1
+            self.time[deleteGid] = 0
+            
+        poses = self.index_to_gid.eq(-1).nonzero().squeeze().type(torch.long)
+        poses = poses[0:num]
+        self.emb[poses] = feats[lid].detach()
+        self.pos[gid] = poses
+        self.index_to_gid[poses] = gid
+
+        indexs = self.pos.ne(-1).nonzero().squeeze().type(torch.long) 
+        self.time[indexs] = self.time[indexs] + 1
+        '''
+        gid = self.time.ge(self.tstale).nonzero().squeeze().type(torch.long) 
+        resetIndexs = self.pos[gid]
+        self.pos[gid] = -1
+        self.index_to_gid[resetIndexs] = -1
+        self.time[gid] = 0
+        '''
+
+
+    def push1(self, gids, feats, grad):
+        # self.emb_size()
+        
+        '''
+        环形缓冲区: 
+        缓冲区大小初始化为num_nodes * ratio
+        梯度满足pgrad阈值比例的中间嵌入缓存在缓冲区中,到达尾部的部分覆盖缓冲区的头部;同时不满足的将缓冲区的有效位置为-1
+        '''
+        pgrad = self.pgrad
         if self.num_embeddings == 0:
             return
         dim = self.embedding_dim
         grad_stat = torch.norm(grad, dim=1)
+        point = (int)(grad_stat.shape[0] * pgrad)
+        grad_thresh = torch.kthvalue(grad_stat, point).values.squeeze()
+        # sorted_grad_stat = torch.sort(grad_stat, dim=0)
+        # sorted_values = sorted_grad_stat.values
+        # sorted_indices = sorted_grad_stat.indices
         deleteLid = grad_stat.ge(grad_thresh).nonzero().squeeze().type(torch.long) 
         deleteGid = gids[deleteLid]
         deleteIndex = self.pos[deleteGid]
@@ -92,49 +281,90 @@ class History(torch.nn.Module):
         self.index_to_gid[indexs] = gid
         self.index += num
 
-    '''
-    def push(self, gids, feats, grad, grad_thresh):
-        """固定缓冲区"""
-        dim = self.embedding_dim
-        grad_stat = torch.norm(grad, dim=1)
-        lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long).tolist()    # 所有满足梯度阈值条件的下标
-        # lid = [b for a in lid for b in a]   
-        gid = [gids[id] for id in lid]
-        #print("before: ", self.index)
-        for index in range(len(gid)):
-            g_id = gid[index]
-            l_id = lid[index]
-            if((self.index < self.num_embeddings) and (self.pos[g_id] == -1)):
-                self.emb[self.index] = feats[l_id].detach()
-                self.pos[g_id] = self.index
-                self.index += 1
-        
-            # if((self.index < self.num_embeddings) and (torch.any(self.pos.eq(g_id))==False)):
-            #     self.emb[self.index] = feats[l_id].detach()
-            #     self.pos[self.index] = g_id
-            #     self.index += 1
-            #else:
-            #    return
-        #print("after: ", self.index, "num: ", len(lid))
-    '''
 
-    '''
-    def push(self, gids, feats, grad, grad_thresh):
-        """固定缓冲区"""
-        dim = self.embedding_dim
-        grad_stat = torch.norm(grad, dim=1)
-        lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long).tolist()    # 所有满足梯度阈值条件的下标
-        # lid = [b for a in lid for b in a]   
-        gid = [gids[id] for id in lid]
-        #print("before: ", self.index)
-        for index in range(len(gid)):
-            g_id = gid[index]
-            l_id = lid[index]
-            if((self.index < self.num_embeddings) and (self.pos[g_id] == -1)):
-                self.emb[self.index] = feats[l_id].detach()
-                self.pos[g_id] = self.index
-                self.index += 1
-    '''
+    def push10(self, gids, feats, grad):
+        '''
+        环形缓冲区: 
+        缓冲区大小初始化为0
+        前tstale次push都直接增大缓冲区,将梯度满足pgrad阈值比例的中间嵌入缓存在缓冲区尾部
+        tstale次之后,梯度满足pgrad阈值比例的中间嵌入缓存在缓冲区中,到达尾部的部分覆盖缓冲区的头部;同时不满足的将缓冲区的有效位置为-1
+        '''
+
+        pgrad = self.pgrad
+        tstale = self.tstale
+
+        if(self.tstale > 0):
+
+            self.tstale -= 1
+        
+            grad_stat = torch.norm(grad, dim=1)
+            point = (int)(grad_stat.shape[0] * pgrad)
+            grad_thresh = torch.kthvalue(grad_stat, point).values.squeeze()
+            lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long)    # 所有满足梯度阈值条件的下标
+            gid = gids[lid]
+            num = gid.shape[0]
+
+            emb = torch.empty(num, self.embedding_dim, device = self.device)
+            emb.fill_(0)
+            index_to_gid = torch.empty(num, device = self.device, dtype=torch.long)
+            index_to_gid.fill_(-1)
+
+            self.emb = torch.cat([self.emb, emb], dim=0)
+            self.index_to_gid = torch.cat([self.index_to_gid, index_to_gid])
+
+            self.num_embeddings += num
+
+            indexs = torch.arange(self.index, self.index + num, 1, device='cuda')
+            self.emb[indexs] = feats[lid].detach()
+            self.pos[gid] = indexs
+            self.index_to_gid[indexs] = gid
+            self.index += num
+
+        if(self.tstale == 0):
+
+            # self.emb_size()
+
+            if self.num_embeddings == 0:
+                return
+            grad_stat = torch.norm(grad, dim=1)
+            point = (int)(grad_stat.shape[0] * pgrad)
+            grad_thresh = torch.kthvalue(grad_stat, point).values.squeeze()
+            # sorted_grad_stat = torch.sort(grad_stat, dim=0)
+            # sorted_values = sorted_grad_stat.values
+            # sorted_indices = sorted_grad_stat.indices
+            deleteLid = grad_stat.ge(grad_thresh).nonzero().squeeze().type(torch.long) 
+            deleteGid = gids[deleteLid]
+            deleteIndex = self.pos[deleteGid]
+            self.pos[deleteGid] = -1
+            self.index_to_gid[deleteIndex] = -1
+
+            lid = grad_stat.le(grad_thresh).nonzero().squeeze().type(torch.long)    # 所有满足梯度阈值条件的下标
+            gid = gids[lid]
+            num = gid.shape[0]
+            if num == 0:
+                return
+            self.index = self.index % self.num_embeddings
+            numTail = self.num_embeddings - self.index
+            numHead = 0
+            if(numTail >= num):
+                numTail = num
+            else:
+                numHead = num - numTail
+            indexTail = torch.arange(self.index, self.index + numTail, 1, device='cuda')
+            indexHead = torch.arange(0, numHead, 1, device='cuda')
+            indexs = torch.cat((indexTail, indexHead), dim = 0)
+
+            indexsToGids = self.index_to_gid[indexs]
+            usedIndexs = indexsToGids.ne(-1).nonzero().squeeze().type(torch.long)
+            usedGids = indexsToGids[usedIndexs]
+            self.pos[usedGids] = -1
+            self.index_to_gid[indexs] = -1
+
+            self.emb[indexs] = feats[lid].detach()
+            self.pos[gid] = indexs
+            self.index_to_gid[indexs] = gid
+            self.index += num
+
 
     def prune(self, block):
         dst_gid = block.dstdata[dgl.NID]

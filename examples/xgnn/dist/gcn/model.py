@@ -32,7 +32,7 @@ class ModelParallelStage(nn.Module):
 class DataParallelStage(nn.Module):
     """数据并行阶段"""
 
-    def __init__(self, num_nodes, n_hidden, n_classes, n_layers, activation, dropout):
+    def __init__(self, num_nodes, n_hidden, ratio, pgrad, tstale, n_classes, n_layers, activation, dropout, device):
         super().__init__()
         self.num_nodes =  num_nodes
         self.n_layers = n_layers           # 2
@@ -41,7 +41,8 @@ class DataParallelStage(nn.Module):
         self.feat_grad = []
         self.feat = []
         self.histories = nn.ModuleList([
-            History(num_nodes, n_hidden) for _ in range(n_layers)
+            #History(num_nodes, n_hidden, ratio, pgrad*2**(n_layers-i-1), (1/2)**(n_layers-i-1)*tstale) for i in range(n_layers)
+            History(num_nodes, n_hidden, ratio, pgrad, tstale, device) for i in range(n_layers)
         ])
         for _ in range(1, n_layers):
             self.layers.append(
@@ -59,6 +60,15 @@ class DataParallelStage(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.activation = activation
 
+    def start_history(self):
+        for h in self.histories:
+            h.start()
+
+    def change_history(self, pgrad, tstale):
+        for h in self.histories:
+            h.set_pgrad(pgrad)
+            h.set_tstale(tstale)
+                   
     def forward(self, blocks, x):
 
         # self.feat.clear()
@@ -105,11 +115,14 @@ class DistGCN(dist.StageModule):
         device,
         activation,
         dropout,
+        ratio,
+        pgrad,
+        tstale,
     ):
         # 模型并行
         model_stage = ModelParallelStage(in_feats, n_hidden, n_workers).to(device)
         # 数据并行
         data_stage = DataParallelStage(
-            num_nodes,n_hidden, n_classes, n_layers - 1, activation, dropout
+            num_nodes,n_hidden, ratio, pgrad, tstale, n_classes, n_layers - 1, activation, dropout, device
         ).to(device)
         super().__init__(model_stage, data_stage, device, activation, dropout)
