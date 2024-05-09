@@ -26,12 +26,9 @@ FEATURE_TIME = 0
 
 
 class NeighborSampler:
-    def __init__(self, g, node_feats, fanouts, world_size, device):
+    def __init__(self, g, fanouts):
         self.g = g
-        self.node_feats = node_feats
         self.fanouts = fanouts
-        self.device = device
-        self.world_size = world_size
 
     # 采样器进程调用用来执行分布式采样
     def sample(self, seeds):
@@ -49,38 +46,9 @@ class NeighborSampler:
             seeds = block.srcdata[dgl.NID]
             blocks.insert(0, block)
         SAMPLE_TIME += time.time() - s
-        new_blocks = self._pull_subgraph(blocks)
-        data, target = self._get_data(new_blocks, self.world_size)
-        return data, target
-
-    def _pull_subgraph(self, blocks):
-        """
-        blocks: DGLGraph in CPU
-        """
-        global SAMPLE_COMM_TIME, FEATURE_TIME
-        s = time.time()
-        new_blocks = pull_subgraph(blocks[0], self.world_size, self.device)
-
-        SAMPLE_COMM_TIME += time.time() - s
-        s = time.time()
-        # 提取特征
-        for block in new_blocks:
-            block.srcdata["features"] = self.node_feats[block.srcdata[dgl.NID]].to(
-                self.device
-            )
-        for i in range(1, len(blocks)):
-            new_blocks.append(blocks[i].to(self.device))
-        seeds = new_blocks[-1].dstdata[dgl.NID]
-        new_blocks[-1].dstdata["labels"] = self.g.ndata["labels"][seeds].to(self.device)
-        FEATURE_TIME += time.time() - s
-        return new_blocks
-
-    def _get_data(self, blocks, world_size):
-        label = blocks[-1].dstdata["labels"]
-        x = []
-        for i in range(world_size):
-            x.append(blocks[i].srcdata["features"])
-        return (blocks, x), label
+        seeds = blocks[-1].dstdata[dgl.NID]
+        blocks[-1].dstdata["labels"] = self.g.ndata["labels"][seeds]
+        return blocks
 
 
 def compute_acc(pred, labels):
@@ -106,10 +74,7 @@ def run(args, device, data):
     # Create sampler
     sampler = NeighborSampler(
         g,
-        in_feats,
         [int(fanout) for fanout in args.fan_out.split(",")],
-        world_size,
-        device,
     )
 
     # Create DataLoader for constructing blocks
@@ -150,7 +115,7 @@ def run(args, device, data):
     optim = optimizer.AdamWithWeightStashing(model, param_version, args.lr)
 
     runtime = StageRuntime(
-        model, rank, world_size, device, optim, loss_fcn, num_warmup=args.num_warmup
+        model, in_feats, rank, world_size, device, optim, loss_fcn, num_warmup=args.num_warmup
     )
     all_time = []
     all_only_sample_time = []

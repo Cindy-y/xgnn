@@ -1,7 +1,7 @@
 import logging
 
 import torch
-
+import dgl
 from . import communication
 from .optimizer import OptimizerWithWeightStashing
 
@@ -34,8 +34,9 @@ class StageRuntime:
                 runtime.backward_and_step()
     """
 
-    def __init__(self, model, rank, num_workers, device, optim, loss_fn, num_warmup=2):
+    def __init__(self, model, node_feats, rank, num_workers, device, optim, loss_fn, num_warmup=2):
         self.model = model
+        self.node_feats = node_feats
         self.num_workers = num_workers
         self.rank = rank
         # 保存模型并行阶段的图结构，以用于数据并行
@@ -208,13 +209,32 @@ class StageRuntime:
 
     def _get_data(self):
         try:
-            data, target = next(self.data_iter)
-            self.targets.append(target)
+            blocks = next(self.data_iter)
         except StopIteration:
             self.data_iter = iter(self.dataloader)
-            data, target = next(self.data_iter)
-            self.targets.append(target)
+            blocks = next(self.data_iter)
+        new_blocks = self._pull_subgraph(blocks)
+        label = new_blocks[-1].dstdata["labels"].to(self.device)
+        x = []
+        for i in range(self.num_workers):
+            x.append(new_blocks[i].srcdata["features"])
+        data = (new_blocks, x)
+        self.targets.append(label)
         return data
+
+    def _pull_subgraph(self, blocks):
+        """
+        blocks: DGLGraph in CPU
+        """
+        new_blocks = communication.pull_subgraph(blocks[0], self.num_workers, self.device)
+        # 提取特征
+        for block in new_blocks:
+            block.srcdata["features"] = self.node_feats[block.srcdata[dgl.NID]].to(
+                self.device
+            )
+        for i in range(1, len(blocks)):
+            new_blocks.append(blocks[i].to(self.device))
+        return new_blocks
 
     def _get_target(self):
         return self.targets.pop(0)
