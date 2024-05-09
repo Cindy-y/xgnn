@@ -133,8 +133,8 @@ def all_gather_async(data, world_size, device):
         list[data]: list of data gathered from each rank
     """
     # world_size = get_world_size()
-    if world_size == 1:
-        return [data]
+    # if world_size == 1:
+    #     return [data]
 
     # serialized to a Tensor
     buffer = pickle.dumps(data)
