@@ -146,19 +146,29 @@ class StageRuntime:
         # 1. get tensor and blocks
         # 2. data forward
         feats = self._receive_tensors_forward()
-        blocks = self.blocks.pop(0)
+        blocks = self.blocks[0]
         feats.require_grad = True
         # assert feats.is_leaf, "features of data forward must be a leaf node"
         output = self.model.data_forward(blocks, feats)
         self.leaf_node = feats
         return output
+    
+    def _grad_statistics(self,grad):
+        """统计梯度信息"""
+        grad_stat = torch.norm(grad, dim=1)
+        print("shape of grad_stat:", grad_stat.shape)
+        print("max:{}, min:{}".format(torch.max(grad_stat), torch.min(grad_stat)))
+        grad_mask = grad_stat <= 1e-4
+        prob = (grad_mask==True).sum() / grad_mask.shape[-1]
+        print("prob:", prob)
+     
 
     def _run_data_backward(self, loss):
-        feats_grad = {}
-
+        #feats_grad = {}
+        blocks = self.blocks.pop(0)
         def save_grad(name):
             def hook(grad):
-                feats_grad[name] = grad
+                self.model.data_stage.module.feat_grad[0][name] = grad
                 # print("features grad shape: {}".format(grad.shape))
 
             return hook
@@ -170,6 +180,27 @@ class StageRuntime:
         # 设置retain_graph=True以避免释放计算图, 因为模型并行阶段的反向传播还需要使用该计算图
         torch.autograd.backward(loss, retain_graph=True)
 
+        feat_grad_alias = self.model.data_stage.module.feat_grad
+        histroy_alias = self.model.data_stage.module.histories
+        feat_alias = self.model.data_stage.module.feat
+
+        #histroy_alias[0].push(blocks[0].srcdata[dgl.NID].tolist(), feats, feats_grad["feats"], 1e-4)
+        #histroy_alias[0].push(blocks[0].srcdata[dgl.NID].tolist(), feat_alias[0], feat_grad_alias[0]["feats"], 1)
+        histroy_alias[0].push(blocks[0].srcdata[dgl.NID], feat_alias[0], feat_grad_alias[0]["feats"], 1e-1)
+        
+        for l, block in enumerate(blocks):
+            if(l != len(blocks)-1):
+                #histroy_alias[l+1].push(block.dstdata[dgl.NID].tolist(), feat_alias[l+1], feat_grad_alias[l+1]["feats"], 1)
+                histroy_alias[l+1].push(block.dstdata[dgl.NID], feat_alias[l+1], feat_grad_alias[l+1]["feats"], 1e-1)
+        assert feat_grad_alias[0]["feats"] is not None, "feats grad is None"
+        assert (
+            feat_grad_alias[0]["feats"].shape == feats.shape
+        ), "feats grad shape: {} is not equal to feats shape: {}".format(
+            feat_grad_alias[0]["feats"].shape, feats.shape
+        )
+        # 发送梯度
+        self._send_tensors_backward(feat_grad_alias[0]["feats"])  
+        '''
         assert feats_grad["feats"] is not None, "feats grad is None"
         assert (
             feats_grad["feats"].shape == feats.shape
@@ -178,6 +209,7 @@ class StageRuntime:
         )
         # 发送梯度
         self._send_tensors_backward(feats_grad["feats"])
+        '''
 
     def _run_model_backward(self):
         # 1. 获取输出梯度以及需要求梯度的叶子节点

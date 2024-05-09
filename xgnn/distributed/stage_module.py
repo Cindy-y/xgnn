@@ -36,6 +36,15 @@ class StageModule(nn.Module):
     def data_forward(self, blocks, feats):
         """获取模型并行阶段的输出后计算数据并行"""
         # 对reduce后的结果执行非线性激活函数
+        self.data_stage.module.feat.clear()
+
+        for i in range(0, self.data_stage.module.n_layers):
+            self.data_stage.module.feat_grad[i] = {}
+        
+        history = self.data_stage.module.histories[0]
+        self.data_stage.module.feat.append(feats)  
+        # 没有block该怎么写，history.pull(block, feats)   
+        history.d_pull(blocks[0], feats)          
         feats = self.activation(feats)
         feats = F.dropout(feats, self.dropout)
         x = self.data_stage(blocks, feats)

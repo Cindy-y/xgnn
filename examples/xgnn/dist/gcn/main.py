@@ -23,28 +23,68 @@ from model import DistGCN
 SAMPLE_TIME = 0
 SAMPLE_COMM_TIME = 0
 FEATURE_TIME = 0
+PRUNE_TIME = 0
+
 
 
 class NeighborSampler:
-    def __init__(self, g, fanouts):
+    def __init__(self, g, node_feats, fanouts, world_size, device, history):
         self.g = g
+        self.node_feats = node_feats
         self.fanouts = fanouts
+        self.device = device
+        self.world_size = world_size
+        self.history = history
 
     # 采样器进程调用用来执行分布式采样
     def sample(self, seeds):
         seeds = torch.LongTensor(np.asarray(seeds))
         blocks = []
         global SAMPLE_TIME
+        global PRUNE_TIME
         s = time.time()
         # 采样
-        for fanout in self.fanouts:
-            # print("fanout: {}".format(fanout))
+        histories = self.history
+
+        for l,fanout in enumerate(self.fanouts):                              
             frontier = dgl.distributed.sample_neighbors(
                 self.g, seeds, fanout, replace=True
             )
             block = dgl.to_block(frontier, seeds)
+            
+            if(l==0):
+                seeds = block.srcdata[dgl.NID]
+                blocks.insert(0, block)
+            elif(l==(len(self.fanouts)-1)):
+                blocks[0].srcdata["pruned"] = torch.zeros(block.dstdata[dgl.NID].shape[0], dtype=torch.bool)
+                block.dstdata["pruned"] = torch.zeros(block.dstdata[dgl.NID].shape[0], dtype=torch.bool)
+                # print("block1: ", block)
+                s1 = time.time()
+                block = block.to(torch.device('cuda'))
+                history = histories[len(histories)-l]
+                # s1 = time.time()
+                block = history.prune(block).to(torch.device('cpu'))
+                blocks[0].srcdata["pruned"] = block.dstdata["pruned"]
+                PRUNE_TIME += time.time() - s1
+                # print("block2: ", block)
+                seeds = block.srcdata[dgl.NID]
+                blocks.insert(0, block)
+            else:
+                block.dstdata["pruned"] = torch.zeros(block.dstdata[dgl.NID].shape[0], dtype=torch.bool)
+                # print("block1: ", block)
+                s1 = time.time()
+                block = block.to(torch.device('cuda'))
+                history = histories[len(histories)-l]
+                # s1 = time.time()
+                block = history.prune(block).to(torch.device('cpu'))
+                PRUNE_TIME += time.time() - s1
+                # print("block2: ", block)
+                seeds = block.srcdata[dgl.NID]
+                blocks.insert(0, block)
+            '''
             seeds = block.srcdata[dgl.NID]
             blocks.insert(0, block)
+            '''
         SAMPLE_TIME += time.time() - s
         seeds = blocks[-1].dstdata[dgl.NID]
         blocks[-1].dstdata["labels"] = self.g.ndata["labels"][seeds]
@@ -59,7 +99,7 @@ def compute_acc(pred, labels):
     return (torch.argmax(pred, dim=1) == labels).float().sum() / len(pred)
 
 
-def run(args, device, data):
+def run(args, device, data, num_nodes):
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     print("rank: {}, world_size: {}".format(rank, world_size))
@@ -70,11 +110,28 @@ def run(args, device, data):
             rank, train_nid.shape[0], val_nid.shape[0], test_nid.shape[0]
         )
     )
+
+    model = DistGCN(
+        num_nodes,
+        in_feats.shape[-1],
+        args.num_hidden,
+        args.n_classes,
+        args.num_layers,
+        world_size,
+        device,
+        F.relu,
+        args.dropout,
+    )
+
     shuffle = True
     # Create sampler
     sampler = NeighborSampler(
         g,
+        in_feats,
         [int(fanout) for fanout in args.fan_out.split(",")],
+        world_size,
+        device,
+        model.data_stage.module.histories
     )
 
     # Create DataLoader for constructing blocks
@@ -101,16 +158,6 @@ def run(args, device, data):
     )
     loss_fcn = nn.CrossEntropyLoss()
     loss_fcn = loss_fcn.to(device)
-    model = DistGCN(
-        in_feats.shape[-1],
-        args.num_hidden,
-        args.n_classes,
-        args.num_layers,
-        world_size,
-        device,
-        F.relu,
-        args.dropout,
-    )
     param_version = args.num_warmup + 1
     optim = optimizer.AdamWithWeightStashing(model, param_version, args.lr)
 
@@ -119,17 +166,18 @@ def run(args, device, data):
     )
     all_time = []
     all_only_sample_time = []
+    all_prune__time = []
     all_sample_comm_time = []
     all_feature_time = []
     for epoch in range(args.num_epochs):
         start = time.time()
-        global SAMPLE_TIME, SAMPLE_COMM_TIME, FEATURE_TIME
-        SAMPLE_TIME, SAMPLE_COMM_TIME, FEATURE_TIME = 0, 0, 0
+        global SAMPLE_TIME, SAMPLE_COMM_TIME, FEATURE_TIME, PRUNE_TIME
+        SAMPLE_TIME, SAMPLE_COMM_TIME, FEATURE_TIME, PRUNE_TIME = 0, 0, 0, 0
         num_iter = (train_nid.shape[-1] + args.batch_size) // args.batch_size
         # 训练
         runtime.train(num_iter, dataloader)
         # warm_up
-        runtime.forward()
+        runtime.forward()                                                         
         for it in range(num_iter):
             output, loss, target = runtime.forward()
             runtime.backward_and_step()
@@ -144,16 +192,18 @@ def run(args, device, data):
         torch.cuda.synchronize()
         all_time.append(time.time() - start)
         all_only_sample_time.append(SAMPLE_TIME)
+        all_prune__time.append(PRUNE_TIME)
         all_sample_comm_time.append(SAMPLE_COMM_TIME)
         all_feature_time.append(FEATURE_TIME)
         print(
-            "Epoch: {}, iteration nums: {}, time: {} (S), sample time:{}, sample comm time: {}, feature time: {}".format(
+            "Epoch: {}, iteration nums: {}, time: {} (S), sample time:{}, sample comm time: {}, feature time: {}, prune time: {}".format(
                 epoch,
                 it,
                 time.time() - start,
                 SAMPLE_TIME,
                 SAMPLE_COMM_TIME,
                 FEATURE_TIME,
+                PRUNE_TIME,
             )
         )
         # 验证集
@@ -173,16 +223,20 @@ def run(args, device, data):
     mean_only_sample_time = torch.tensor(
         all_only_sample_time, dtype=torch.float32
     ).mean()
+    mean_prune_time = torch.tensor(
+        all_prune__time, dtype = torch.float32
+    ).mean()
     mean_sample_comm_time = torch.tensor(
         all_sample_comm_time, dtype=torch.float32
     ).mean()
     mean_feature_time = torch.tensor(all_feature_time, dtype=torch.float32).mean()
     print(
-        "Epoch mean time: {} s, mean sample time: {}, mean sample comm time: {}, mean feature time: {}".format(
+        "Epoch mean time: {} s, mean sample time: {}, mean sample comm time: {}, mean feature time: {}, mean prune time: {}".format(
             mean_time,
             mean_only_sample_time,
             mean_sample_comm_time,
             mean_feature_time,
+            mean_prune_time,
         )
     )
     if args.eval:
@@ -288,10 +342,12 @@ def main(args):
     n_classes = len(torch.unique(labels[torch.logical_not(torch.isnan(labels))]))
     print("#labels:{}, label shape: {}".format(n_classes, g.ndata["labels"].shape))
 
+    num_nodes = g.ndata["labels"].shape[0]
+
     rank = int(os.environ["RANK"])
     in_feats = load_features(args.part_config, rank).to(device)
     data = train_nid, val_nid, test_nid, in_feats, n_classes, g
-    run(args, device, data)
+    run(args, device, data, num_nodes)
 
 
 if __name__ == "__main__":
