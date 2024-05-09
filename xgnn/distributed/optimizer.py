@@ -31,7 +31,7 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
         self.data_optim = getattr(torch.optim, optim_name)(
             self.data_module.parameters(), **optimizer_args
         )
-        self.initialize_queue()
+        #self.initialize_queue()
 
     def __getattr__(self, key):
         """Relay the unknown key to base_optimizer."""
@@ -113,12 +113,12 @@ class OptimizerWithWeightStashing(torch.optim.Optimizer):
 
     def data_step(self):
         self.data_optim.step()
-        self.data_queue.append(self.get_data_params(clone=True))
+        #self.data_queue.append(self.get_data_params(clone=True))
         pass
 
     def model_step(self):
         self.model_optim.step()
-        self.model_queue.append(self.get_model_params(clone=True))
+        #self.model_queue.append(self.get_model_params(clone=True))
         pass
 
     def step(self):

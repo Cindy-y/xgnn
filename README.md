@@ -94,28 +94,11 @@ apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler && \
 	rm -rf /var/lib/apt/lists/*
 ```
-4. 编译安装pytorch:
+4. 安装pytorch:
 ```shell
-mkdir ~/temp
-cd ~/temp
-# 下载能够支持多版本参数的PyTorch源码
-git clone --recursive https://github.com/Ningsir/pytorch.git -b multi-version
-cd pytorch
-# if you are updating an existing checkout
-git submodule sync
-git submodule update --init --recursive
-
-# 编译安装PyTorch
-export CMAKE_PREFIX_PATH=${CONDA_PREFIX:-"$(dirname $(which conda))/../"}
-USE_NINJA=OFF python setup.py install --cmake
-
-cd ~
-rm -rf ~/temp
+pip install torch==1.9.0+cu102 torchvision==0.10.0+cu102 torchaudio==0.9.0 -f https://download.pytorch.org/whl/torch_stable.html
 ```
 
-> 可能出现的问题：报错缺少valgrind.h文件
->
-> 解决办法：cd third_party/valgrind && git checkout VALGRIND_3_18_0
 5. 安装dgl:
 ```shell
 conda install -y -c dglteam dgl-cuda10.2=0.7.1

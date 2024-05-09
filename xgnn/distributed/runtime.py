@@ -194,17 +194,17 @@ class StageRuntime:
         torch.autograd.backward(feats, grad_tensors=grad, retain_graph=False)
 
     def _data_backward_and_step(self, loss):
-        self.optim.load_data_old_params()
+        #self.optim.load_data_old_params()
         self.optim.data_zero_grad()
         self._run_data_backward(loss)
-        self.optim.load_data_new_params()
+        #self.optim.load_data_new_params()
         self.optim.data_step()
 
     def _model_backward_and_step(self):
-        self.optim.load_model_old_params()
+        #self.optim.load_model_old_params()
         self.optim.model_zero_grad()
         self._run_model_backward()
-        self.optim.load_model_new_params()
+        #self.optim.load_model_new_params()
         self.optim.model_step()
 
     def _get_data(self):
